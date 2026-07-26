@@ -37,7 +37,7 @@ func tinyJPEG(t *testing.T) []byte {
 func TestFetchLogoDataURI(t *testing.T) {
 	jpg := tinyJPEG(t)
 	// Deliberately MISLABEL the JPEG as image/png in the media type — exactly the production shape
-	// (accounts.codevertexitsolutions.com serves a JPEG under an image/png data URI). The type must
+	// (accounts.codevertexafrica.com serves a JPEG under an image/png data URI). The type must
 	// still come back as JPG, sniffed from the bytes.
 	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(jpg)
 	data, typ := FetchLogo(uri)

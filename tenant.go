@@ -44,7 +44,7 @@ func TenantCacheKey(slug string) string {
 
 // GetTenantDetails returns cached tenant details for the given slug.
 // On cache miss, fetches from auth-api and caches with the given TTL.
-// authBaseURL is the auth-api base URL (e.g. "https://sso.codevertexitsolutions.com").
+// authBaseURL is the auth-api base URL (e.g. "https://sso.codevertexafrica.com").
 func GetTenantDetails(ctx context.Context, c *Aside, authBaseURL string, slug string, ttl time.Duration) (TenantDetails, error) {
 	if ttl == 0 {
 		ttl = DefaultTenantTTL
