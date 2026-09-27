@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -56,20 +57,67 @@ func GetOrSet[T any](ctx context.Context, c *Aside, key string, ttl time.Duratio
 		c.logger.Warn("cache get failed", zap.String("key", key), zap.Error(err))
 	}
 
-	// Cache miss — fetch from source.
-	v, err := fetch(ctx)
+	// Cache miss — fetch from source. Concurrent misses on the same key in this process share
+	// one fetch (single-flight), so a cold key under load costs the source one call, not one per
+	// request (seen live: 15 identical tenant lookups in the same second).
+	shared, err := misses.do(key, func() (any, error) {
+		v, err := fetch(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// Store in cache (best-effort).
+		if b, jsonErr := json.Marshal(v); jsonErr == nil {
+			if setErr := c.rdb.Set(ctx, key, b, ttl).Err(); setErr != nil {
+				c.logger.Warn("cache set failed", zap.String("key", key), zap.Error(setErr))
+			}
+		}
+		return v, nil
+	})
 	if err != nil {
 		return zero, err
 	}
-
-	// Store in cache (best-effort).
-	if b, jsonErr := json.Marshal(v); jsonErr == nil {
-		if setErr := c.rdb.Set(ctx, key, b, ttl).Err(); setErr != nil {
-			c.logger.Warn("cache set failed", zap.String("key", key), zap.Error(setErr))
-		}
+	v, ok := shared.(T)
+	if !ok {
+		// Same key used with two value types: never share across them.
+		return fetch(ctx)
 	}
-
 	return v, nil
+}
+
+// flightGroup runs at most one fetch per key at a time; callers arriving while it runs wait for
+// and share its result. A minimal local form of golang.org/x/sync/singleflight.
+type flightGroup struct {
+	mu    sync.Mutex
+	calls map[string]*flightCall
+}
+
+type flightCall struct {
+	done chan struct{}
+	val  any
+	err  error
+}
+
+var misses = &flightGroup{calls: map[string]*flightCall{}}
+
+func (g *flightGroup) do(key string, fn func() (any, error)) (any, error) {
+	g.mu.Lock()
+	if c, ok := g.calls[key]; ok {
+		g.mu.Unlock()
+		<-c.done
+		return c.val, c.err
+	}
+	c := &flightCall{done: make(chan struct{})}
+	g.calls[key] = c
+	g.mu.Unlock()
+
+	defer func() {
+		g.mu.Lock()
+		delete(g.calls, key)
+		g.mu.Unlock()
+		close(c.done)
+	}()
+	c.val, c.err = fn()
+	return c.val, c.err
 }
 
 // Invalidate deletes one or more keys. Use for mutation-triggered invalidation.
