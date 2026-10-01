@@ -17,6 +17,7 @@ type RedisConfig struct {
 	// URL is a redis:// or rediss:// URL. When set it wins over Addr/Password/DB.
 	URL      string
 	Addr     string
+	Username string // Redis 6+ ACL user; empty uses the default user
 	Password string
 	DB       int
 	TLS      bool
@@ -44,7 +45,7 @@ func NewRedis(ctx context.Context, cfg RedisConfig) (*redis.Client, error) {
 		if strings.TrimSpace(cfg.Addr) == "" {
 			return nil, fmt.Errorf("redis address not configured")
 		}
-		opts = &redis.Options{Addr: cfg.Addr, Password: cfg.Password, DB: cfg.DB}
+		opts = &redis.Options{Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password, DB: cfg.DB}
 		if cfg.TLS {
 			opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
