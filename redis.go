@@ -28,10 +28,11 @@ type RedisConfig struct {
 	WriteTimeout time.Duration // default 500ms
 }
 
-// NewRedis builds a client from cfg and pings it. A ping failure is returned together with the
+// NewRedis builds a client from cfg and pings it. It returns the concrete *redis.Client, which
+// satisfies redis.UniversalClient everywhere this module accepts one. A ping failure is returned together with the
 // client: callers that treat Redis as optional can log it and keep the client (it reconnects on
 // its own), callers that require Redis can fail startup.
-func NewRedis(ctx context.Context, cfg RedisConfig) (redis.UniversalClient, error) {
+func NewRedis(ctx context.Context, cfg RedisConfig) (*redis.Client, error) {
 	var opts *redis.Options
 	if cfg.URL != "" {
 		parsed, err := redis.ParseURL(cfg.URL)
@@ -48,6 +49,9 @@ func NewRedis(ctx context.Context, cfg RedisConfig) (redis.UniversalClient, erro
 			opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 		}
 	}
+	// Our Redis 7 has no CLIENT MAINT_NOTIFICATIONS / client-side-cache identity support; the
+	// identity handshake only produces noisy errors on every new connection.
+	opts.DisableIdentity = true
 	opts.PoolSize = cfg.PoolSize
 	opts.MinIdleConns = orInt(cfg.MinIdleConns, 2)
 	opts.DialTimeout = orDur(cfg.DialTimeout, 2*time.Second)
