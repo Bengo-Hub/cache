@@ -160,3 +160,24 @@ func TestNewAcceptsTypedNilClient(t *testing.T) {
 		t.Fatalf("typed nil client must fall back to fetch, got %v %v", v, err)
 	}
 }
+
+func TestRunOnceHoldsAfterSuccess(t *testing.T) {
+	mr, rdb := newTestRedis(t)
+	ctx := context.Background()
+	runs := 0
+	job := func(context.Context) error { runs++; return nil }
+	_, _ = RunOnce(ctx, rdb, nil, "tick:1", time.Hour, job)
+	_, _ = RunOnce(ctx, rdb, nil, "tick:1", time.Hour, job)
+	if runs != 1 {
+		t.Fatalf("same period must run once, ran %d", runs)
+	}
+	if ttl := mr.TTL("tick:1"); ttl < 59*time.Minute {
+		t.Fatalf("key should be held for the period, ttl %v", ttl)
+	}
+	failing := func(context.Context) error { runs++; return context.DeadlineExceeded }
+	_, _ = RunOnce(ctx, rdb, nil, "tick:2", time.Hour, failing)
+	_, _ = RunOnce(ctx, rdb, nil, "tick:2", time.Hour, job)
+	if runs != 3 {
+		t.Fatalf("a failed run must free the period for a retry, runs=%d", runs)
+	}
+}

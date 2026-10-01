@@ -114,3 +114,78 @@ func RunExclusive(ctx context.Context, rdb redis.UniversalClient, log *zap.Logge
 	}
 	return true, err
 }
+
+var holdScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return 0`)
+
+// RunOnce runs fn at most once fleet-wide for key within hold. Use it for scheduled jobs where
+// every replica wakes at the same time (top of the hour, nightly): put the period in the key
+// (e.g. "auth:backup:2026100114") and pass a hold at least as long as the period.
+//
+// Unlike RunExclusive, a successful run keeps the key until hold expires, so a replica whose
+// timer fires a moment after the first one finished cannot run the same period again. A
+// failed run releases the key so another replica (or the next tick) can retry. While fn runs
+// the lease is renewed like RunExclusive. Redis down: fn does not run, ErrLockUnavailable.
+func RunOnce(ctx context.Context, rdb redis.UniversalClient, log *zap.Logger, key string, hold time.Duration, fn func(ctx context.Context) error) (ran bool, err error) {
+	lease := hold
+	if lease > 10*time.Minute {
+		lease = 10 * time.Minute // renewed while running; short so a crashed holder frees fast
+	}
+	if lease < 3*time.Second {
+		lease = 3 * time.Second
+	}
+	lock, ok, err := TryLock(ctx, rdb, key, lease)
+	if err != nil || !ok {
+		return false, err
+	}
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(lease / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if still, rerr := lock.Refresh(context.WithoutCancel(ctx)); rerr == nil && !still {
+					if log != nil {
+						log.Warn("run-once lease lost, stopping job", zap.String("key", key))
+					}
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	err = fn(jobCtx)
+	close(done)
+	rctx, rcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer rcancel()
+	if err != nil {
+		_ = lock.Release(rctx)
+		return true, err
+	}
+	if herr := holdScript.Run(rctx, rdb, []string{key}, lock.token, hold.Milliseconds()).Err(); herr != nil && log != nil {
+		log.Warn("run-once hold failed", zap.String("key", key), zap.Error(herr))
+	}
+	return true, nil
+}
+
+// PeriodKey appends the current period to prefix, e.g. PeriodKey("auth:backup", time.Hour)
+// gives "auth:backup:2026100114" (UTC), for use with RunOnce.
+func PeriodKey(prefix string, period time.Duration) string {
+	now := time.Now().UTC()
+	switch {
+	case period >= 24*time.Hour:
+		return prefix + ":" + now.Format("20060102")
+	case period >= time.Hour:
+		return prefix + ":" + now.Format("2006010215")
+	default:
+		return prefix + ":" + now.Truncate(period).Format("200601021504")
+	}
+}
