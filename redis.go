@@ -14,7 +14,8 @@ import (
 // are the same fleet-wide instead of go-redis defaults (3s read timeouts that let a stalled
 // Redis hold a request for seconds).
 type RedisConfig struct {
-	// URL is a redis:// or rediss:// URL. When set it wins over Addr/Password/DB.
+	// URL is a redis:// or rediss:// URL. When set it wins over Addr/DB; Username/Password, if
+	// set, override the URL's credentials.
 	URL      string
 	Addr     string
 	Username string // Redis 6+ ACL user; empty uses the default user
@@ -41,6 +42,14 @@ func NewRedis(ctx context.Context, cfg RedisConfig) (*redis.Client, error) {
 			return nil, fmt.Errorf("parse redis url: %w", err)
 		}
 		opts = parsed
+		// A separately supplied password (REDIS_PASSWORD next to a password-less REDIS_URL,
+		// a common secret layout) wins over the URL's.
+		if cfg.Password != "" {
+			opts.Password = cfg.Password
+		}
+		if cfg.Username != "" {
+			opts.Username = cfg.Username
+		}
 	} else {
 		if strings.TrimSpace(cfg.Addr) == "" {
 			return nil, fmt.Errorf("redis address not configured")
