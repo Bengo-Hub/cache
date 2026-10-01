@@ -213,3 +213,16 @@ func TestClaimPeriod(t *testing.T) {
 	}
 	SetLeaseClient(nil)
 }
+
+func TestClaimOnce(t *testing.T) {
+	_, rdb := newTestRedis(t)
+	SetLeaseClient(rdb)
+	defer SetLeaseClient(nil)
+	ctx := context.Background()
+	if !ClaimOnce(ctx, "sla:t1:warning", time.Hour) || ClaimOnce(ctx, "sla:t1:warning", time.Hour) {
+		t.Fatal("only the first claim of a key may win")
+	}
+	if !ClaimOnce(ctx, "sla:t1:critical", time.Hour) {
+		t.Fatal("a different key is independent")
+	}
+}

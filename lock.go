@@ -238,3 +238,22 @@ func ClaimPeriod(ctx context.Context, name string, period time.Duration) bool {
 	ok, err := rdb.SetNX(cctx, PeriodKey("job:"+name, period), "1", period).Result()
 	return err == nil && ok
 }
+
+// ClaimOnce reports whether this caller is the first to claim key within ttl, fleet-wide. Use
+// it for side effects that must happen once per business event even though several replicas
+// (or repeated scans) see the event: "notify SLA breach level X for task T", "send the 7-day
+// warning for billing period P". Same Redis semantics as ClaimPeriod: unconfigured Redis
+// claims (single instance), configured but unreachable Redis does not (the caller retries on
+// its next scan instead of every replica acting).
+func ClaimOnce(ctx context.Context, key string, ttl time.Duration) bool {
+	leaseMu.RLock()
+	rdb, set := leaseClient, leaseSet
+	leaseMu.RUnlock()
+	if !set || rdb == nil {
+		return true
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ok, err := rdb.SetNX(cctx, "once:"+key, "1", ttl).Result()
+	return err == nil && ok
+}
