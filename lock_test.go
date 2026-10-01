@@ -181,3 +181,14 @@ func TestRunOnceHoldsAfterSuccess(t *testing.T) {
 		t.Fatalf("a failed run must free the period for a retry, runs=%d", runs)
 	}
 }
+
+func TestPeriodKeyBuckets(t *testing.T) {
+	k6 := PeriodKey("job", 6*time.Hour)
+	hh := k6[len(k6)-4 : len(k6)-2]
+	if hh != "00" && hh != "06" && hh != "12" && hh != "18" {
+		t.Fatalf("6h bucket must align to 00/06/12/18 UTC, got %s", k6)
+	}
+	if k := PeriodKey("job", 24*time.Hour); k[len(k)-4:] != "0000" {
+		t.Fatalf("daily bucket must be UTC midnight, got %s", k)
+	}
+}

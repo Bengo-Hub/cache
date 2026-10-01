@@ -176,16 +176,13 @@ func RunOnce(ctx context.Context, rdb redis.UniversalClient, log *zap.Logger, ke
 	return true, nil
 }
 
-// PeriodKey appends the current period to prefix, e.g. PeriodKey("auth:backup", time.Hour)
-// gives "auth:backup:2026100114" (UTC), for use with RunOnce.
+// PeriodKey appends the current period bucket to prefix, for use with RunOnce: every replica
+// computes the same key within one period, so the job runs once per period fleet-wide no
+// matter when each replica's ticker fires. Buckets are aligned in UTC (period 1h gives
+// "prefix:202610011400", 6h gives 00:00/06:00/12:00/18:00, 24h gives UTC midnight).
 func PeriodKey(prefix string, period time.Duration) string {
-	now := time.Now().UTC()
-	switch {
-	case period >= 24*time.Hour:
-		return prefix + ":" + now.Format("20060102")
-	case period >= time.Hour:
-		return prefix + ":" + now.Format("2006010215")
-	default:
-		return prefix + ":" + now.Truncate(period).Format("200601021504")
+	if period <= 0 {
+		period = time.Hour
 	}
+	return prefix + ":" + time.Now().UTC().Truncate(period).Format("200601021504")
 }
