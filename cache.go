@@ -22,15 +22,39 @@ const (
 	TTLOperational = 30 * time.Second // active data: order lists, task lists
 )
 
+// MaxValueBytes is the largest serialized value GetOrSet/GetOrSetStale will store. Redis runs
+// with maxmemory + allkeys-lru, so one oversized report would push thousands of small hot keys
+// out; such values are returned to the caller but not cached.
+const MaxValueBytes = 1 << 20
+
+// fetchTimeout bounds a single-flight fetch. The fetch runs detached from the first caller's
+// cancellation (other callers are waiting on it) but must still end.
+const fetchTimeout = 60 * time.Second
+
 // Aside implements the cache-aside (lazy-loading) pattern.
 type Aside struct {
-	rdb    *redis.Client
+	rdb    redis.UniversalClient
 	logger *zap.Logger
 }
 
-// New creates a new cache-aside helper.
-func New(rdb *redis.Client, logger *zap.Logger) *Aside {
+// New creates a new cache-aside helper. Accepts *redis.Client, *redis.ClusterClient or a
+// failover client.
+func New(rdb redis.UniversalClient, logger *zap.Logger) *Aside {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	if isNilClient(rdb) {
+		rdb = nil
+	}
 	return &Aside{rdb: rdb, logger: logger.Named("cache")}
+}
+
+// Client returns the underlying Redis client (nil when caching is disabled).
+func (c *Aside) Client() redis.UniversalClient {
+	if c == nil {
+		return nil
+	}
+	return c.rdb
 }
 
 // GetOrSet returns the cached value for key if present, otherwise calls fetch,
@@ -60,17 +84,16 @@ func GetOrSet[T any](ctx context.Context, c *Aside, key string, ttl time.Duratio
 	// Cache miss — fetch from source. Concurrent misses on the same key in this process share
 	// one fetch (single-flight), so a cold key under load costs the source one call, not one per
 	// request (seen live: 15 identical tenant lookups in the same second).
+	// The fetch runs on a context detached from this caller's cancellation: other requests
+	// may be waiting on the same flight, and one client disconnecting must not fail them all.
 	shared, err := misses.do(key, func() (any, error) {
-		v, err := fetch(ctx)
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
+		defer cancel()
+		v, err := fetch(fctx)
 		if err != nil {
 			return nil, err
 		}
-		// Store in cache (best-effort).
-		if b, jsonErr := json.Marshal(v); jsonErr == nil {
-			if setErr := c.rdb.Set(ctx, key, b, ttl).Err(); setErr != nil {
-				c.logger.Warn("cache set failed", zap.String("key", key), zap.Error(setErr))
-			}
-		}
+		c.store(fctx, key, v, ttl)
 		return v, nil
 	})
 	if err != nil {
@@ -82,6 +105,21 @@ func GetOrSet[T any](ctx context.Context, c *Aside, key string, ttl time.Duratio
 		return fetch(ctx)
 	}
 	return v, nil
+}
+
+// store writes v under key with ttl, best effort, skipping values over MaxValueBytes.
+func (c *Aside) store(ctx context.Context, key string, v any, ttl time.Duration) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	if len(b) > MaxValueBytes {
+		c.logger.Warn("cache value too large, not cached", zap.String("key", key), zap.Int("bytes", len(b)))
+		return
+	}
+	if err := c.rdb.Set(ctx, key, b, ttl).Err(); err != nil {
+		c.logger.Warn("cache set failed", zap.String("key", key), zap.Error(err))
+	}
 }
 
 // flightGroup runs at most one fetch per key at a time; callers arriving while it runs wait for
@@ -125,25 +163,45 @@ func (c *Aside) Invalidate(ctx context.Context, keys ...string) {
 	if c == nil || c.rdb == nil || len(keys) == 0 {
 		return
 	}
-	if err := c.rdb.Del(ctx, keys...).Err(); err != nil {
+	all := make([]string, 0, len(keys)*2)
+	for _, k := range keys {
+		all = append(all, k, k+staleSuffix)
+	}
+	if err := c.rdb.Del(ctx, all...).Err(); err != nil {
 		c.logger.Warn("cache invalidate failed", zap.Strings("keys", keys), zap.Error(err))
 	}
 }
 
 // InvalidatePattern deletes all keys matching a glob pattern (e.g. "inv:items:tenant-1:*").
+// It walks the keyspace with SCAN (non-blocking, unlike KEYS) and deletes with UNLINK so large
+// values are freed off the Redis main thread. A trailing "*" also matches the stale-while-
+// revalidate copies written by GetOrSetStale. On a cluster client it scans every master.
 func (c *Aside) InvalidatePattern(ctx context.Context, pattern string) {
 	if c == nil || c.rdb == nil {
 		return
 	}
+	if cc, ok := c.rdb.(*redis.ClusterClient); ok {
+		_ = cc.ForEachMaster(ctx, func(ctx context.Context, node *redis.Client) error {
+			c.scanDelete(ctx, node, pattern)
+			return nil
+		})
+		return
+	}
+	c.scanDelete(ctx, c.rdb, pattern)
+}
+
+func (c *Aside) scanDelete(ctx context.Context, rdb redis.Cmdable, pattern string) {
 	var cursor uint64
 	for {
-		keys, next, err := c.rdb.Scan(ctx, cursor, pattern, 100).Result()
+		keys, next, err := rdb.Scan(ctx, cursor, pattern, 500).Result()
 		if err != nil {
 			c.logger.Warn("cache scan failed", zap.String("pattern", pattern), zap.Error(err))
 			return
 		}
 		if len(keys) > 0 {
-			c.rdb.Del(ctx, keys...)
+			if err := rdb.Unlink(ctx, keys...).Err(); err != nil {
+				c.logger.Warn("cache unlink failed", zap.String("pattern", pattern), zap.Error(err))
+			}
 		}
 		cursor = next
 		if cursor == 0 {

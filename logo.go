@@ -58,6 +58,9 @@ func FetchLogo(logoURL string) ([]byte, string) {
 	if strings.HasPrefix(logoURL, "data:") {
 		data = decodeDataURI(logoURL)
 	} else {
+		if hit, ok := logoBytes.Get(logoURL); ok {
+			return hit.data, hit.typ
+		}
 		resp, err := logoHTTPClient.Get(logoURL) //nolint:noctx // URL from the trusted auth-api tenant cache
 		if err != nil {
 			return nil, ""
@@ -79,8 +82,24 @@ func FetchLogo(logoURL string) ([]byte, string) {
 	if typ == "" {
 		return nil, ""
 	}
+	if !strings.HasPrefix(logoURL, "data:") && len(data) <= maxCachedLogoBytes {
+		logoBytes.Set(logoURL, cachedLogo{data: data, typ: typ})
+	}
 	return data, typ
 }
+
+// cachedLogo is a downloaded logo kept in pod memory so a burst of document renders (a menu PDF,
+// a statement run) downloads each tenant logo once, not once per document. Bounded to 64 logos of
+// at most 512 KB each (32 MB worst case) for 10 minutes, so a changed logo shows up quickly and
+// memory cannot grow without limit. Larger logos are still used, just not kept.
+type cachedLogo struct {
+	data []byte
+	typ  string
+}
+
+const maxCachedLogoBytes = 512 << 10
+
+var logoBytes = NewLocal[string, cachedLogo](64, 10*time.Minute)
 
 // decodeDataURI decodes a base64 RFC-2397 data: URI ("data:[<mediatype>];base64,<b64>") into its raw
 // bytes, tolerating stray whitespace/newlines in the payload (uploaders sometimes wrap the base64).
