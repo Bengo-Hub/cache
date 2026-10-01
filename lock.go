@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -185,4 +186,55 @@ func PeriodKey(prefix string, period time.Duration) string {
 		period = time.Hour
 	}
 	return prefix + ":" + time.Now().UTC().Truncate(period).Format("200601021504")
+}
+
+var (
+	leaseMu     sync.RWMutex
+	leaseClient redis.UniversalClient
+	leaseSet    bool
+)
+
+// SetLeaseClient sets the Redis client ClaimPeriod uses. Call once at startup. Passing nil
+// (Redis not configured, e.g. local development) makes ClaimPeriod always claim, which is
+// right for a single instance.
+func SetLeaseClient(rdb redis.UniversalClient) {
+	leaseMu.Lock()
+	defer leaseMu.Unlock()
+	if isNilClient(rdb) {
+		rdb = nil
+	}
+	leaseClient, leaseSet = rdb, true
+}
+
+// ClaimPeriod reports whether this replica should run job `name` for the current period.
+//
+// Scheduled jobs start a ticker on every replica, so without a claim every replica repeats
+// the work and its side effects (emails, invoices, charges, events). Put this first in the
+// job's work function:
+//
+//	func sendReminders(ctx context.Context, ...) {
+//		if !sharedcache.ClaimPeriod(ctx, "subscriptions:grace-reminders", 6*time.Hour) {
+//			return
+//		}
+//		...
+//
+// The first replica to ask in a period gets true; every later ask in that period (other
+// replicas, restarts, startup runs) gets false. The claim is a SET NX on PeriodKey(name,
+// period) held for the period, so it also survives the claimer crashing (the next period
+// retries). If Redis is configured but unreachable it returns false: skipping one tick is
+// safer than every replica doing it.
+func ClaimPeriod(ctx context.Context, name string, period time.Duration) bool {
+	leaseMu.RLock()
+	rdb, set := leaseClient, leaseSet
+	leaseMu.RUnlock()
+	if !set || rdb == nil {
+		return true
+	}
+	if period <= 0 {
+		period = time.Hour
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	ok, err := rdb.SetNX(cctx, PeriodKey("job:"+name, period), "1", period).Result()
+	return err == nil && ok
 }

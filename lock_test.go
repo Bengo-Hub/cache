@@ -192,3 +192,24 @@ func TestPeriodKeyBuckets(t *testing.T) {
 		t.Fatalf("daily bucket must be UTC midnight, got %s", k)
 	}
 }
+
+func TestClaimPeriod(t *testing.T) {
+	mr, rdb := newTestRedis(t)
+	ctx := context.Background()
+	SetLeaseClient(nil)
+	if !ClaimPeriod(ctx, "j", time.Hour) || !ClaimPeriod(ctx, "j", time.Hour) {
+		t.Fatal("without Redis configured every call claims (single instance)")
+	}
+	SetLeaseClient(rdb)
+	if !ClaimPeriod(ctx, "j", time.Hour) {
+		t.Fatal("first claim in a period must win")
+	}
+	if ClaimPeriod(ctx, "j", time.Hour) {
+		t.Fatal("second claim in the same period must lose")
+	}
+	mr.Close()
+	if ClaimPeriod(ctx, "other", time.Hour) {
+		t.Fatal("configured but unreachable Redis must not claim")
+	}
+	SetLeaseClient(nil)
+}
