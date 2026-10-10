@@ -61,9 +61,20 @@ func (c *Aside) Client() redis.UniversalClient {
 // stores the result with the given TTL, and returns it.
 // T must be JSON-serialisable.
 func GetOrSet[T any](ctx context.Context, c *Aside, key string, ttl time.Duration, fetch func(ctx context.Context) (T, error)) (T, error) {
+	return GetOrSetTTL(ctx, c, key, func(ctx context.Context) (T, time.Duration, error) {
+		v, err := fetch(ctx)
+		return v, ttl, err
+	})
+}
+
+// GetOrSetTTL is GetOrSet for values that decide their own lifetime: fetch returns the
+// TTL with the value (e.g. an upstream response that says how long it stays valid).
+// A TTL of 0 or less returns the value without caching it.
+func GetOrSetTTL[T any](ctx context.Context, c *Aside, key string, fetch func(ctx context.Context) (T, time.Duration, error)) (T, error) {
 	var zero T
 	if c == nil || c.rdb == nil {
-		return fetch(ctx)
+		v, _, err := fetch(ctx)
+		return v, err
 	}
 
 	// Try cache first.
@@ -89,11 +100,13 @@ func GetOrSet[T any](ctx context.Context, c *Aside, key string, ttl time.Duratio
 	shared, err := misses.do(key, func() (any, error) {
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fetchTimeout)
 		defer cancel()
-		v, err := fetch(fctx)
+		v, ttl, err := fetch(fctx)
 		if err != nil {
 			return nil, err
 		}
-		c.store(fctx, key, v, ttl)
+		if ttl > 0 {
+			c.store(fctx, key, v, ttl)
+		}
 		return v, nil
 	})
 	if err != nil {
@@ -102,7 +115,8 @@ func GetOrSet[T any](ctx context.Context, c *Aside, key string, ttl time.Duratio
 	v, ok := shared.(T)
 	if !ok {
 		// Same key used with two value types: never share across them.
-		return fetch(ctx)
+		v2, _, err := fetch(ctx)
+		return v2, err
 	}
 	return v, nil
 }

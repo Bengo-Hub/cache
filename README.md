@@ -8,6 +8,7 @@ Shared caching, locking and Redis client helpers for every Go service.
 |---|---|---|
 | Shared read cache visible to every pod | `GetOrSet` (Redis, cache-aside) | Redis `maxmemory 3gb` + `allkeys-lru`; every key has a TTL |
 | Expensive aggregate (dashboards, reports) | `GetOrSetStale` (stale-while-revalidate) | same, TTL = ttl + staleFor |
+| Value whose lifetime comes with it (an upstream says how long it is valid) | `GetOrSetTTL` (fetch returns value and TTL) | same; TTL 0 is returned but not cached |
 | Per-pod cache (API keys, settings, compiled templates, clients) | `NewLocal[K,V](maxEntries, ttl)` | hard cap on entries, least recently used evicted, expired entries purged |
 | Run a scheduled job on one pod only | `RunExclusive` | lease key with TTL |
 | Build the Redis client | `NewRedis(ctx, RedisConfig)` | pool + 500ms timeouts |
@@ -41,6 +42,9 @@ Do not use session `pg_try_advisory_lock` through PgBouncer for this: in transac
 lock and unlock can land on different backends.
 
 ## Versions
+
+- v0.5.8: `GetOrSetTTL` for values that carry their own lifetime (used by ordering's delivery
+  quotes, which logistics marks valid for its policy's `quote_cache_seconds`).
 
 - v0.5.0: `UniversalClient`, `GetOrSetStale`, `Local` (bounded LRU), `TryLock`/`RunExclusive`,
   `NewRedis`, value-size guard, detached single-flight, `UNLINK` pattern invalidation, logo byte cache.
