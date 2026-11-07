@@ -42,13 +42,20 @@ func TenantCacheKey(slug string) string {
 	return "tenant:" + slug
 }
 
+// tenantTTLJitter spreads tenant cache expiry over an extra 10% of the TTL (36 minutes
+// for the 6h default), so services that cached a tenant together refresh apart.
+const tenantTTLJitter = 0.1
+
 // GetTenantDetails returns cached tenant details for the given slug.
-// On cache miss, fetches from auth-api and caches with the given TTL.
-// authBaseURL is the auth-api base URL (e.g. "https://sso.codevertexafrica.com").
+// On cache miss, fetches from auth-api and caches with the given TTL plus up to 10%
+// random jitter (see Jitter).
+// authBaseURL is the auth-api base URL; in-cluster services should pass the cluster
+// Service (http://auth-api.auth.svc.cluster.local:4000), not the public hostname.
 func GetTenantDetails(ctx context.Context, c *Aside, authBaseURL string, slug string, ttl time.Duration) (TenantDetails, error) {
 	if ttl == 0 {
 		ttl = DefaultTenantTTL
 	}
+	ttl = Jitter(ttl, tenantTTLJitter)
 	return GetOrSet(ctx, c, TenantCacheKey(slug), ttl, func(ctx context.Context) (TenantDetails, error) {
 		return fetchTenantFromAuthAPI(ctx, authBaseURL, slug)
 	})
