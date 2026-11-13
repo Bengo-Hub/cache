@@ -41,7 +41,18 @@ and cancels the job if the lease is lost. When Redis is down it does not run the
 Do not use session `pg_try_advisory_lock` through PgBouncer for this: in transaction pooling the
 lock and unlock can land on different backends.
 
+## Tenant support contact
+
+`GetTenantDetails` returns `Support` ({email, phone, whatsapp}), read from auth-api tenant metadata
+`support`. `ResolveSupportContact(details)` applies the support routing rule in one place: the
+support email, else the contact email; the support phone (or WhatsApp number), else the contact
+phone; the support WhatsApp number (or phone), else the contact phone. Services use it for ticket
+mail, Reply-To, footers and payment pages instead of reading `contact_email` directly.
+
 ## Versions
+
+- v0.5.10: `TenantDetails.Support`, `TenantSupportFromMetadata` and `ResolveSupportContact` (support
+  routing, 12 November 2026).
 
 - v0.5.8: `GetOrSetTTL` for values that carry their own lifetime (used by ordering's delivery
   quotes, which logistics marks valid for its policy's `quote_cache_seconds`).

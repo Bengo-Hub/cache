@@ -31,6 +31,9 @@ type TenantDetails struct {
 	SubscriptionStatus string         `json:"subscription_status,omitempty"`
 	TierLimits         map[string]any `json:"tier_limits,omitempty"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
+	// Support is the tenant's support contact read from metadata "support". It is filled on every
+	// read; use ResolveSupportContact for the value with the contact email and phone fallback.
+	Support TenantSupport `json:"support,omitzero"`
 }
 
 // DefaultTenantTTL is the default cache TTL for tenant data, aligned with JWT token lifetime.
@@ -56,9 +59,13 @@ func GetTenantDetails(ctx context.Context, c *Aside, authBaseURL string, slug st
 		ttl = DefaultTenantTTL
 	}
 	ttl = Jitter(ttl, tenantTTLJitter)
-	return GetOrSet(ctx, c, TenantCacheKey(slug), ttl, func(ctx context.Context) (TenantDetails, error) {
+	d, err := GetOrSet(ctx, c, TenantCacheKey(slug), ttl, func(ctx context.Context) (TenantDetails, error) {
 		return fetchTenantFromAuthAPI(ctx, authBaseURL, slug)
 	})
+	if err != nil {
+		return d, err
+	}
+	return withSupport(d), nil
 }
 
 // GetTenantBranding returns just the branding fields from cached tenant details.
@@ -120,5 +127,5 @@ func fetchTenantFromAuthAPI(ctx context.Context, authBaseURL, slug string) (Tena
 	if err := json.NewDecoder(resp.Body).Decode(&details); err != nil {
 		return TenantDetails{}, fmt.Errorf("cache.fetchTenant: decode: %w", err)
 	}
-	return details, nil
+	return withSupport(details), nil
 }
